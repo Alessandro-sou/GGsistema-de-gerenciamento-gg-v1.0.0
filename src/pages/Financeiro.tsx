@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Plus, Trash2, TrendingUp, TrendingDown, DollarSign, Edit2, Check, X } from "lucide-react";
+import { Plus, Trash2, TrendingUp, TrendingDown, DollarSign, Users, Calendar, Filter } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -8,31 +8,43 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
-import { getLancamentos, addLancamento, deleteLancamento, type Lancamento } from "@/lib/mediadores-store";
+import {
+  LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  PieChart, Pie, Cell, Legend, Area, AreaChart
+} from "recharts";
+import { getLancamentos, addLancamento, deleteLancamento, getVendas, type Lancamento, type Venda } from "@/lib/mediadores-store";
 
 const container = { hidden: {}, show: { transition: { staggerChildren: 0.1 } } };
 const item = { hidden: { opacity: 0, y: 20 }, show: { opacity: 1, y: 0 } };
 
+const COLORS = ["#10b981", "#ef4444", "#3b82f6", "#f59e0b", "#8b5cf6"];
+
 export default function Financeiro() {
   const [lancamentos, setLancamentos] = useState<Lancamento[]>([]);
+  const [vendas, setVendas] = useState<Venda[]>([]);
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState({
     tipo: "ganho" as "ganho" | "gasto",
     valor: "",
     categoria: "",
     descricao: "",
   });
+  const [periodo, setPeriodo] = useState<"7dias" | "30dias" | "90dias" | "ano">("30dias");
 
   const loadData = async () => {
     setLoading(true);
     try {
-      const data = await getLancamentos();
-      setLancamentos(data);
+      const [lancamentosData, vendasData] = await Promise.all([
+        getLancamentos(),
+        getVendas()
+      ]);
+      setLancamentos(lancamentosData);
+      setVendas(vendasData);
     } catch (error) {
-      console.error("Erro ao carregar lançamentos:", error);
+      console.error("Erro ao carregar dados:", error);
       toast.error("Erro ao carregar dados");
     } finally {
       setLoading(false);
@@ -91,6 +103,7 @@ export default function Financeiro() {
     }
   };
 
+  // Calcular totais
   const totalGanhos = lancamentos
     .filter((l) => l.tipo === "ganho")
     .reduce((sum, l) => sum + l.valor, 0);
@@ -99,7 +112,89 @@ export default function Financeiro() {
     .filter((l) => l.tipo === "gasto")
     .reduce((sum, l) => sum + l.valor, 0);
   
-  const saldo = totalGanhos - totalGastos;
+  const totalVendas = vendas.reduce((sum, v) => sum + v.valor, 0);
+  
+  const totalReceitas = totalGanhos + totalVendas;
+  const saldo = totalReceitas - totalGastos;
+
+  // Dados para gráficos de lançamentos por categoria
+  const ganhosPorCategoria = lancamentos
+    .filter(l => l.tipo === "ganho")
+    .reduce((acc, l) => {
+      acc[l.categoria] = (acc[l.categoria] || 0) + l.valor;
+      return acc;
+    }, {} as Record<string, number>);
+
+  const gastosPorCategoria = lancamentos
+    .filter(l => l.tipo === "gasto")
+    .reduce((acc, l) => {
+      acc[l.categoria] = (acc[l.categoria] || 0) + l.valor;
+      return acc;
+    }, {} as Record<string, number>);
+
+  const pieGanhosData = Object.entries(ganhosPorCategoria).map(([name, value]) => ({ name, value }));
+  const pieGastosData = Object.entries(gastosPorCategoria).map(([name, value]) => ({ name, value }));
+
+  // Dados para gráfico de evolução temporal
+  const getDataPorPeriodo = () => {
+    const now = new Date();
+    let dias = 30;
+    if (periodo === "7dias") dias = 7;
+    if (periodo === "90dias") dias = 90;
+    if (periodo === "ano") dias = 365;
+    
+    const dataInicio = new Date(now);
+    dataInicio.setDate(dataInicio.getDate() - dias);
+    
+    const lancamentosFiltrados = lancamentos.filter(l => new Date(l.data_lancamento) >= dataInicio);
+    const vendasFiltradas = vendas.filter(v => new Date(v.data_venda) >= dataInicio);
+    
+    // Agrupar por data
+    const dataMap = new Map<string, { ganhos: number; gastos: number; vendas: number }>();
+    
+    lancamentosFiltrados.forEach(l => {
+      const date = new Date(l.data_lancamento).toLocaleDateString("pt-BR");
+      const current = dataMap.get(date) || { ganhos: 0, gastos: 0, vendas: 0 };
+      if (l.tipo === "ganho") {
+        current.ganhos += l.valor;
+      } else {
+        current.gastos += l.valor;
+      }
+      dataMap.set(date, current);
+    });
+    
+    vendasFiltradas.forEach(v => {
+      const date = new Date(v.data_venda).toLocaleDateString("pt-BR");
+      const current = dataMap.get(date) || { ganhos: 0, gastos: 0, vendas: 0 };
+      current.vendas += v.valor;
+      dataMap.set(date, current);
+    });
+    
+    return Array.from(dataMap.entries())
+      .map(([date, data]) => ({ 
+        date, 
+        receitas: data.ganhos + data.vendas,
+        gastos: data.gastos 
+      }))
+      .sort((a, b) => {
+        const [aDay, aMonth, aYear] = a.date.split("/");
+        const [bDay, bMonth, bYear] = b.date.split("/");
+        return new Date(`${aYear}-${aMonth}-${aDay}`).getTime() - new Date(`${bYear}-${bMonth}-${bDay}`).getTime();
+      });
+  };
+
+  const evolucaoData = getDataPorPeriodo();
+
+  // Vendas por mediador
+  const vendasPorMediador = vendas.reduce((acc, v) => {
+    acc[v.mediador_nome] = (acc[v.mediador_nome] || 0) + v.valor;
+    return acc;
+  }, {} as Record<string, number>);
+
+  const vendasMediadorData = Object.entries(vendasPorMediador)
+    .map(([name, value]) => ({ name, value }))
+    .sort((a, b) => b.value - a.value)
+    .slice(0, 10);
 
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat("pt-BR", {
@@ -113,8 +208,6 @@ export default function Financeiro() {
       day: "2-digit",
       month: "2-digit",
       year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
     });
   };
 
@@ -201,11 +294,11 @@ export default function Financeiro() {
       </div>
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 sm:gap-4">
         <motion.div variants={item} className="stat-card">
           <TrendingUp className="h-5 w-5 sm:h-6 sm:w-6 text-success mb-2" />
-          <p className="text-lg sm:text-2xl font-bold text-success">{formatCurrency(totalGanhos)}</p>
-          <p className="text-[10px] sm:text-sm text-muted-foreground">Total de Ganhos</p>
+          <p className="text-lg sm:text-2xl font-bold text-success">{formatCurrency(totalReceitas)}</p>
+          <p className="text-[10px] sm:text-sm text-muted-foreground">Total de Receitas</p>
         </motion.div>
         <motion.div variants={item} className="stat-card">
           <TrendingDown className="h-5 w-5 sm:h-6 sm:w-6 text-destructive mb-2" />
@@ -213,11 +306,168 @@ export default function Financeiro() {
           <p className="text-[10px] sm:text-sm text-muted-foreground">Total de Gastos</p>
         </motion.div>
         <motion.div variants={item} className="stat-card">
+          <Users className="h-5 w-5 sm:h-6 sm:w-6 text-chart-4 mb-2" />
+          <p className="text-lg sm:text-2xl font-bold text-chart-4">{formatCurrency(totalVendas)}</p>
+          <p className="text-[10px] sm:text-sm text-muted-foreground">Vendas de Mediadores</p>
+        </motion.div>
+        <motion.div variants={item} className="stat-card">
           <DollarSign className="h-5 w-5 sm:h-6 sm:w-6 text-primary mb-2" />
           <p className={`text-lg sm:text-2xl font-bold ${saldo >= 0 ? "text-success" : "text-destructive"}`}>
             {formatCurrency(saldo)}
           </p>
           <p className="text-[10px] sm:text-sm text-muted-foreground">Saldo Total</p>
+        </motion.div>
+      </div>
+
+      {/* Gráficos */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+        {/* Evolução Temporal */}
+        <motion.div variants={item} className="glass-card p-4 sm:p-6 glow-red">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-base sm:text-lg font-semibold">Evolução Financeira</h2>
+            <div className="flex gap-1">
+              <Button
+                variant={periodo === "7dias" ? "default" : "outline"}
+                size="sm"
+                onClick={() => setPeriodo("7dias")}
+                className={periodo === "7dias" ? "bg-primary" : "border-border"}
+              >
+                7d
+              </Button>
+              <Button
+                variant={periodo === "30dias" ? "default" : "outline"}
+                size="sm"
+                onClick={() => setPeriodo("30dias")}
+                className={periodo === "30dias" ? "bg-primary" : "border-border"}
+              >
+                30d
+              </Button>
+              <Button
+                variant={periodo === "90dias" ? "default" : "outline"}
+                size="sm"
+                onClick={() => setPeriodo("90dias")}
+                className={periodo === "90dias" ? "bg-primary" : "border-border"}
+              >
+                90d
+              </Button>
+              <Button
+                variant={periodo === "ano" ? "default" : "outline"}
+                size="sm"
+                onClick={() => setPeriodo("ano")}
+                className={periodo === "ano" ? "bg-primary" : "border-border"}
+              >
+                1a
+              </Button>
+            </div>
+          </div>
+          <ResponsiveContainer width="100%" height={250}>
+            <AreaChart data={evolucaoData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="hsl(220,15%,20%)" />
+              <XAxis dataKey="date" stroke="hsl(220,10%,55%)" fontSize={11} />
+              <YAxis stroke="hsl(220,10%,55%)" fontSize={11} />
+              <Tooltip
+                contentStyle={{ background: "hsl(220,18%,13%)", border: "1px solid hsl(220,15%,20%)", borderRadius: 8 }}
+                labelStyle={{ color: "hsl(220,10%,92%)" }}
+                formatter={(value: number) => formatCurrency(value)}
+              />
+              <Area type="monotone" dataKey="receitas" stroke="#10b981" fill="#10b981" fillOpacity={0.3} name="Receitas" />
+              <Area type="monotone" dataKey="gastos" stroke="#ef4444" fill="#ef4444" fillOpacity={0.3} name="Gastos" />
+            </AreaChart>
+          </ResponsiveContainer>
+        </motion.div>
+
+        {/* Vendas por Mediador */}
+        <motion.div variants={item} className="glass-card p-4 sm:p-6">
+          <h2 className="text-base sm:text-lg font-semibold mb-4">Vendas por Mediador</h2>
+          {vendasMediadorData.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-[250px] text-muted-foreground">
+              <Users className="h-12 w-12 opacity-20 mb-2" />
+              <p className="text-sm">Nenhuma venda registrada</p>
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={250}>
+              <BarChart data={vendasMediadorData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="hsl(220,15%,20%)" />
+                <XAxis dataKey="name" stroke="hsl(220,10%,55%)" fontSize={11} angle={-45} textAnchor="end" height={80} />
+                <YAxis stroke="hsl(220,10%,55%)" fontSize={11} />
+                <Tooltip
+                  contentStyle={{ background: "hsl(220,18%,13%)", border: "1px solid hsl(220,15%,20%)", borderRadius: 8 }}
+                  labelStyle={{ color: "hsl(220,10%,92%)" }}
+                  formatter={(value: number) => formatCurrency(value)}
+                />
+                <Bar dataKey="value" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </motion.div>
+      </div>
+
+      {/* Gráficos de Pizza */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+        <motion.div variants={item} className="glass-card p-4 sm:p-6">
+          <h2 className="text-base sm:text-lg font-semibold mb-4">Distribuição de Ganhos</h2>
+          {pieGanhosData.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-[240px] text-muted-foreground">
+              <TrendingUp className="h-12 w-12 opacity-20 mb-2" />
+              <p className="text-sm">Nenhum ganho registrado</p>
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={240}>
+              <PieChart>
+                <Pie
+                  data={pieGanhosData}
+                  cx="50%"
+                  cy="50%"
+                  innerRadius={50}
+                  outerRadius={80}
+                  dataKey="value"
+                  label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(0)}%`}
+                >
+                  {pieGanhosData.map((_, index) => (
+                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                  ))}
+                </Pie>
+                <Tooltip
+                  contentStyle={{ background: "hsl(220,18%,13%)", border: "1px solid hsl(220,15%,20%)", borderRadius: 8 }}
+                  formatter={(value: number) => formatCurrency(value)}
+                />
+                <Legend />
+              </PieChart>
+            </ResponsiveContainer>
+          )}
+        </motion.div>
+
+        <motion.div variants={item} className="glass-card p-4 sm:p-6">
+          <h2 className="text-base sm:text-lg font-semibold mb-4">Distribuição de Gastos</h2>
+          {pieGastosData.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-[240px] text-muted-foreground">
+              <TrendingDown className="h-12 w-12 opacity-20 mb-2" />
+              <p className="text-sm">Nenhum gasto registrado</p>
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={240}>
+              <PieChart>
+                <Pie
+                  data={pieGastosData}
+                  cx="50%"
+                  cy="50%"
+                  innerRadius={50}
+                  outerRadius={80}
+                  dataKey="value"
+                  label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(0)}%`}
+                >
+                  {pieGastosData.map((_, index) => (
+                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                  ))}
+                </Pie>
+                <Tooltip
+                  contentStyle={{ background: "hsl(220,18%,13%)", border: "1px solid hsl(220,15%,20%)", borderRadius: 8 }}
+                  formatter={(value: number) => formatCurrency(value)}
+                />
+                <Legend />
+              </PieChart>
+            </ResponsiveContainer>
+          )}
         </motion.div>
       </div>
 
